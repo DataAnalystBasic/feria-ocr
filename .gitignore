@@ -135,6 +135,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv_feria-ocr
 
 # Spyder project settings
 .spyderproject
