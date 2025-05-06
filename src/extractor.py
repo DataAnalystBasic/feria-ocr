@@ -9,8 +9,9 @@ import pytesseract
 
 # -- 1) Configuración de Tesseract --
 # Si no lo detecta automáticamente, descomenta y ajusta la ruta:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Users\gonza\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+)
 def preprocess(img_path):
     """
     1) Leer en BGR.
