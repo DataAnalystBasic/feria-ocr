@@ -59,7 +59,6 @@ def ocr_image(img):
             lines.append(text.strip())
     return lines
 
-
 def parse_fields(lines):
     """
     1) Precio: busca todos los números “1.200” o “1200” y toma el mayor.
