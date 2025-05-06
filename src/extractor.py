@@ -5,60 +5,72 @@ import re
 import argparse
 import cv2
 import pandas as pd
+import pytesseract
 
-# 1) Importamos PaddleOCR
-from paddleocr import PaddleOCR
+# -- 1) Configuración de Tesseract --
+# Si no lo detecta automáticamente, descomenta y ajusta la ruta:
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-def preprocess(path):
+def preprocess(img_path):
     """
-    1. Lee la imagen desde disco.
-    2. Pasa a escala de grises.
-    3. Aplica CLAHE (ecualización adaptativa por regiones).
-    4. Difumina ligeramente para reducir ruido.
+    1) Leer en BGR.
+    2) Pasar a gris.
+    3) Aplicar CLAHE (ecualiza y resalta contrastes).
+    4) Difuminar suavemente.
+    5) Umbralizar en BINARIO inverso (texto claro sobre fondo oscuro).
+    6) Cerrar pequeños huecos (morfología).
     """
-    img = cv2.imread(path)
+    img = cv2.imread(img_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # CLAHE mejora contraste en zonas oscuras y claras
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     cl = clahe.apply(gray)
-    # Suave desenfoque
-    proc = cv2.GaussianBlur(cl, (3,3), 0)
-    return proc
+    blur = cv2.GaussianBlur(cl, (3,3), 0)
+    _, thr = cv2.threshold(blur, 0, 255,
+                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+    return cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-def ocr_text(img, ocr):
+def ocr_image(img):
     """
-    Ejecuta OCR sobre la imagen preprocesada.
-    Filtra resultados con confianza ≥0.5.
-    Devuelve lista de líneas de texto.
+    1) Llama a pytesseract.image_to_data para obtener cada palabra con su caja y confianza.
+    2) Filtra solo las conf ≥ 50.
+    3) Devuelve una lista de líneas (agrupando palabras por línea).
     """
-    # PaddleOCR devuelve [[ [x1,y1],…,[x4,y4] ], (texto, conf)] por línea
-    result = ocr.ocr(img, cls=True)
+    data = pytesseract.image_to_data(
+        img,
+        lang='spa+eng',
+        config='--psm 6',   # asume un bloque de texto uniforme
+        output_type=pytesseract.Output.DATAFRAME
+    )
+    # Filtrar por confianza
+    data = data[data.confidence >= 50]
     lines = []
-    for line in result:
-        for box, (txt, conf) in line:
-            if conf >= 0.5:
-                lines.append(txt)
+    # Agrupar por línea de texto reconocido
+    for _, group in data.groupby('line_num'):
+        text = ' '.join(group.text.astype(str).tolist())
+        if text.strip():
+            lines.append(text.strip())
     return lines
 
 def parse_fields(lines):
     """
-    1. Precio: extrae todos los números estilo “1.200” o “1200” y toma el mayor.
-    2. Unidad: busca “kilo”, “kg”, “corte” o “unidad”.
-    3. Producto: de las líneas sin dígitos, escoge la más larga.
+    1) Precio: busca todos los números “1.200” o “1200” y toma el mayor.
+    2) Unidad: extrae 'kilo', 'kg', 'corte' o 'unidad'.
+    3) Producto: de las líneas sin dígitos, escoge la palabra más larga.
     """
-    # —– Precio —————————————————————————————————————
+    # ——— PRECIOS —————————————————————————————————
     nums = []
     for l in lines:
         for m in re.findall(r'(\d{1,3}(?:\.\d{3})*)', l):
             nums.append(int(m.replace('.', '')))
     precio = str(max(nums)) if nums else ''
 
-    # —– Unidad —————————————————————————————————————
+    # ——— UNIDADES ———————————————————————————————
     u = re.findall(r'\b(kilo|kg|corte|unidad)\b',
                    ' '.join(lines), flags=re.IGNORECASE)
     unidad = u[0].lower() if u else ''
 
-    # —– Producto ——————————————————————————————————
+    # ——— PRODUCTO ———————————————————————————————
     candidatos = [l.lower() for l in lines
                   if re.match(r'^[A-Za-záéíóúñ]+$', l)]
     producto = max(candidatos, key=len) if candidatos else ''
@@ -66,46 +78,42 @@ def parse_fields(lines):
     return producto, unidad, precio
 
 def main():
-    # 1) Argumentos de línea de comandos
-    p = argparse.ArgumentParser(
-        description="OCR feria con PaddleOCR: extrae producto, unidad y precio")
-    p.add_argument('-i','--input', required=True,
-                   help="Carpeta con imágenes (.jpg/.png)")
-    p.add_argument('-o','--output', required=True,
-                   help="Carpeta donde guardar resultados")
-    p.add_argument('-f','--format', choices=['csv','excel','json'],
-                   default='csv', help="Formato de salida")
-    args = p.parse_args()
-
-    # 2) Inicializar PaddleOCR (español + detección de ángulo)
-    ocr = PaddleOCR(lang='es', use_angle_cls=True)
+    parser = argparse.ArgumentParser(
+        description="OCR feria: extrae producto, unidad y precio")
+    parser.add_argument("-i","--input", required=True,
+                        help="Carpeta con imágenes (.jpg/.png)")
+    parser.add_argument("-o","--output", required=True,
+                        help="Carpeta donde guardar resultados")
+    parser.add_argument("-f","--format", choices=["csv","excel","json"],
+                        default="csv", help="Formato de salida")
+    args = parser.parse_args()
 
     registros = []
-    for fn in os.listdir(args.input):
-        if not fn.lower().endswith(('.jpg','.png')): continue
-        path = os.path.join(args.input, fn)
-        img = preprocess(path)
-        lines = ocr_text(img, ocr)
+    for fname in os.listdir(args.input):
+        if not fname.lower().endswith(('.jpg','.png')):
+            continue
+        ruta = os.path.join(args.input, fname)
+        img_proc = preprocess(ruta)
+        lines = ocr_image(img_proc)
         prod, uni, pre = parse_fields(lines)
         registros.append({
-            'archivo': fn,
+            'archivo': fname,
             'producto': prod,
             'unidad': uni,
             'precio': pre
         })
 
-    # 3) Guardar resultados
     df = pd.DataFrame(registros)
     os.makedirs(args.output, exist_ok=True)
-    base = os.path.join(args.output, 'resultados')
-    if args.format == 'csv':
-        df.to_csv(base + '.csv', index=False, encoding='utf-8-sig')
-    elif args.format == 'excel':
-        df.to_excel(base + '.xlsx', index=False)
+    base = os.path.join(args.output, "resultados")
+    if args.format == "csv":
+        df.to_csv(base + ".csv", index=False, encoding="utf-8-sig")
+    elif args.format == "excel":
+        df.to_excel(base + ".xlsx", index=False)
     else:
-        df.to_json(base + '.json', orient='records', force_ascii=False)
+        df.to_json(base + ".json", orient="records", force_ascii=False)
 
     print(f"✔ Resultados guardados en {args.output} como *.{args.format}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
