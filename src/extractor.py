@@ -33,25 +33,32 @@ def preprocess(img_path):
 
 def ocr_image(img):
     """
-    1) Llama a pytesseract.image_to_data para obtener cada palabra con su caja y confianza.
-    2) Filtra solo las conf ≥ 50.
-    3) Devuelve una lista de líneas (agrupando palabras por línea).
+    Ejecuta Tesseract sobre imagen preprocesada y devuelve líneas de texto limpias.
+    Filtra solo palabras con confianza ≥ 50.
     """
     data = pytesseract.image_to_data(
         img,
         lang='spa+eng',
-        config='--psm 6',   # asume un bloque de texto uniforme
+        config='--psm 6',
         output_type=pytesseract.Output.DATAFRAME
     )
-    # Filtrar por confianza
-    data = data[data.confidence >= 50]
+
+    # Verifica que tenga contenido y columna 'conf'
+    if data is None or 'conf' not in data.columns:
+        return []
+
+    # Convierte 'conf' a numérico (algunos valores pueden ser '-1' como string)
+    data['conf'] = pd.to_numeric(data['conf'], errors='coerce')
+    data = data[data['conf'] >= 50]
+
+    # Agrupa por líneas
     lines = []
-    # Agrupar por línea de texto reconocido
     for _, group in data.groupby('line_num'):
-        text = ' '.join(group.text.astype(str).tolist())
+        text = ' '.join(group['text'].astype(str).tolist())
         if text.strip():
             lines.append(text.strip())
     return lines
+
 
 def parse_fields(lines):
     """
