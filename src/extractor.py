@@ -7,6 +7,7 @@
 import os
 import argparse
 import pandas as pd
+import cv2
 from preprocess import encontrar_cartel, ocr_lineas
 from parser_utils import extraer_campos
 
