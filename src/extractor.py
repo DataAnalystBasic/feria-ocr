@@ -1,126 +1,123 @@
-# src/extractor.py
-
-import os
-import re
-import argparse
+import os, re, argparse
 import cv2
 import pandas as pd
 import pytesseract
+import imutils
+from imutils.perspective import four_point_transform
+from rapidfuzz import process, fuzz
+from catalogo import PRODUCTOS, UNIDADES
 
-# -- 1) Configuración de Tesseract --
-# Si no lo detecta automáticamente, descomenta y ajusta la ruta:
+# Ajusta a tu ruta:
 pytesseract.pytesseract.tesseract_cmd = (
     r"C:\Users\gonza\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 )
-def preprocess(img_path):
-    """
-    1) Leer en BGR.
-    2) Pasar a gris.
-    3) Aplicar CLAHE (ecualiza y resalta contrastes).
-    4) Difuminar suavemente.
-    5) Umbralizar en BINARIO inverso (texto claro sobre fondo oscuro).
-    6) Cerrar pequeños huecos (morfología).
-    """
-    img = cv2.imread(img_path)
+
+# ---------- 1. LOCALIZAR Y ENDEREZAR EL CARTEL -----------------
+def encontrar_cartel(img):
+    """Devuelve el recorte warp de la región más grande de 4 lados (posible pizarra)."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    cl = clahe.apply(gray)
-    blur = cv2.GaussianBlur(cl, (3,3), 0)
-    _, thr = cv2.threshold(blur, 0, 255,
-                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
-    return cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=1)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    edged = cv2.Canny(blur, 50, 150)
 
-def ocr_image(img):
-    """
-    Ejecuta Tesseract sobre imagen preprocesada y devuelve líneas de texto limpias.
-    Filtra solo palabras con confianza ≥ 50.
-    """
-    data = pytesseract.image_to_data(
-        img,
-        lang='spa+eng',
-        config='--psm 6',
-        output_type=pytesseract.Output.DATAFRAME
-    )
+    cnts = cv2.findContours(edged, cv2.RETR_EXTERNAL,
+                            cv2.CHAIN_APPROX_SIMPLE)[0]
+    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
 
-    # Verifica que tenga contenido y columna 'conf'
-    if data is None or 'conf' not in data.columns:
-        return []
+    for c in cnts:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02*peri, True)
+        if len(approx) == 4 and cv2.contourArea(c) > 5000:
+            return four_point_transform(img, approx.reshape(4,2))
+    # fallback: imagen entera
+    return img
 
-    # Convierte 'conf' a numérico (algunos valores pueden ser '-1' como string)
-    data['conf'] = pd.to_numeric(data['conf'], errors='coerce')
-    data = data[data['conf'] >= 50]
+# ---------- 2. PRE‑PROCESADO + OCR MULTI‑PASO -------------------
+def ocr_lineas(img):
+    """Devuelve conjunto de líneas tras dos pasadas de Tesseract."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # CLAHE mejora contraste
+    clahe = cv2.createCLAHE(2.0, (8,8))
+    proc = clahe.apply(gray)
+    proc = cv2.GaussianBlur(proc, (3,3), 0)
+    # escalar ×2
+    proc = cv2.resize(proc, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
-    # Agrupa por líneas
-    lines = []
-    for _, group in data.groupby('line_num'):
-        text = ' '.join(group['text'].astype(str).tolist())
-        if text.strip():
-            lines.append(text.strip())
-    return lines
+    lineas = set()
+    for psm in [6, 7]:
+        df = pytesseract.image_to_data(
+            proc, lang="spa+eng",
+            config=f"--psm {psm}",
+            output_type=pytesseract.Output.DATAFRAME
+        )
+        if 'conf' not in df:               # OCR vacío
+            continue
+        df['conf'] = pd.to_numeric(df['conf'], errors='coerce')
+        df = df[df['conf'] >= 50]
+        for _, g in df.groupby('line_num'):
+            linea = ' '.join(g.text.astype(str))
+            if linea.strip():
+                lineas.add(linea.strip())
+    return list(lineas)
 
-def parse_fields(lines):
-    """
-    1) Precio: busca todos los números “1.200” o “1200” y toma el mayor.
-    2) Unidad: extrae 'kilo', 'kg', 'corte' o 'unidad'.
-    3) Producto: de las líneas sin dígitos, escoge la palabra más larga.
-    """
-    # ——— PRECIOS —————————————————————————————————
-    nums = []
-    for l in lines:
-        for m in re.findall(r'(\d{1,3}(?:\.\d{3})*)', l):
-            nums.append(int(m.replace('.', '')))
+# ---------- 3. PARSEO + FUZZY MATCH -----------------------------
+def mejor_coincidencia(candidatos, catalogo, umbral=70):
+    if not candidatos: return ''
+    texto = max(candidatos, key=len).lower()
+    match, score, _ = process.extractOne(texto, catalogo,
+                                         scorer=fuzz.token_sort_ratio)
+    return match if score >= umbral else texto  # si falla, deja OCR tal cual
+
+def extraer_campos(lineas):
+    # precio
+    nums = [int(x.replace('.',''))
+            for l in lineas for x in re.findall(r'\d{1,3}(?:\.\d{3})*', l)]
     precio = str(max(nums)) if nums else ''
 
-    # ——— UNIDADES ———————————————————————————————
-    u = re.findall(r'\b(kilo|kg|corte|unidad)\b',
-                   ' '.join(lines), flags=re.IGNORECASE)
-    unidad = u[0].lower() if u else ''
+    # unidad
+    uni_raw = re.findall(r'\b(k?g|kilo|corte|unidad)\b',
+                         ' '.join(lineas), flags=re.IGNORECASE)
+    unidad = mejor_coincidencia(uni_raw, UNIDADES)
 
-    # ——— PRODUCTO ———————————————————————————————
-    candidatos = [l.lower() for l in lines
-                  if re.match(r'^[A-Za-záéíóúñ]+$', l)]
-    producto = max(candidatos, key=len) if candidatos else ''
+    # producto
+    candidatos = [l for l in lineas if re.fullmatch(r'[A-Za-zÁÉÍÓÚÑáéíóúñ ]+', l)]
+    producto = mejor_coincidencia(candidatos, PRODUCTOS)
 
     return producto, unidad, precio
 
+# ---------- 4. PIPELINE -----------------------------------------
+def procesar_imagen(ruta):
+    img = cv2.imread(ruta)
+    cartel = encontrar_cartel(img)
+    lineas = ocr_lineas(cartel)
+    return extraer_campos(lineas)
+
+# ---------- 5. CLI ----------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(
-        description="OCR feria: extrae producto, unidad y precio")
-    parser.add_argument("-i","--input", required=True,
-                        help="Carpeta con imágenes (.jpg/.png)")
-    parser.add_argument("-o","--output", required=True,
-                        help="Carpeta donde guardar resultados")
-    parser.add_argument("-f","--format", choices=["csv","excel","json"],
-                        default="csv", help="Formato de salida")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser("OCR feria mejorado")
+    ap.add_argument("-i","--input", required=True)
+    ap.add_argument("-o","--output", required=True)
+    ap.add_argument("-f","--format", choices=['csv','excel','json'],
+                    default='csv')
+    args = ap.parse_args()
 
     registros = []
-    for fname in os.listdir(args.input):
-        if not fname.lower().endswith(('.jpg','.png')):
-            continue
-        ruta = os.path.join(args.input, fname)
-        img_proc = preprocess(ruta)
-        lines = ocr_image(img_proc)
-        prod, uni, pre = parse_fields(lines)
-        registros.append({
-            'archivo': fname,
-            'producto': prod,
-            'unidad': uni,
-            'precio': pre
-        })
+    for fn in os.listdir(args.input):
+        if fn.lower().endswith(('.jpg','.png')):
+            p, u, pr = procesar_imagen(os.path.join(args.input, fn))
+            registros.append({'archivo': fn,
+                              'producto': p, 'unidad': u, 'precio': pr})
 
     df = pd.DataFrame(registros)
     os.makedirs(args.output, exist_ok=True)
     base = os.path.join(args.output, "resultados")
-    if args.format == "csv":
-        df.to_csv(base + ".csv", index=False, encoding="utf-8-sig")
-    elif args.format == "excel":
-        df.to_excel(base + ".xlsx", index=False)
+    if args.format=='csv':
+        df.to_csv(base+".csv", index=False, encoding='utf-8-sig')
+    elif args.format=='excel':
+        df.to_excel(base+".xlsx", index=False)
     else:
-        df.to_json(base + ".json", orient="records", force_ascii=False)
+        df.to_json(base+".json", orient='records', force_ascii=False)
 
-    print(f"✔ Resultados guardados en {args.output} como *.{args.format}")
+    print(f"✔ Generado {base}.{args.format}")
 
 if __name__ == "__main__":
     main()
