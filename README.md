@@ -1,8 +1,3 @@
-Perfecto, aquí tienes el contenido actualizado para tu `README.md`, compatible con lo que has construido hasta ahora. Este archivo resume claramente la funcionalidad, uso, estructura de carpetas y detalles técnicos del proyecto **feria-ocr**, con tu firma integrada de forma profesional y discreta.
-
----
-
-```markdown
 # Feria OCR
 
 **Automatiza la lectura de precios, productos y unidades desde letreros fotográficos en ferias libres.**
@@ -117,7 +112,7 @@ Para:
 
 ## ✍ Autor
 
-Este software fue desarrollado por **Gonzalo Cisterna Salinas**, Técnico en Automatización y Analista Programador, como parte de su portafolio de proyectos en ciencia de datos y visión computacional.
+Este software fue desarrollado por **Gonzalo Cisterna Salinas**, Analista Programador, como parte de su portafolio de proyectos en ciencia de datos y visión computacional.
 
 *Firma digital incluida dentro del código:*
 `# _hidden_signature_: "GonzaloCisterna_feriaOCR"`
@@ -138,7 +133,3 @@ Este proyecto es de libre uso para fines educativos o de automatización persona
 
 ```
 
----
-
-¿Deseas que también cree el `requirements.txt` actualizado con las dependencias exactas de este proyecto?
-```
